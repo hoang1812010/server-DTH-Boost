@@ -287,6 +287,9 @@ app.post("/api/session/refresh", (req, res) => {
   return res.json(makeLicenseResponse(row));
 });
 
-app.listen(PORT, () => {
-  console.log(`DTH Boost key server listening on http://localhost:${PORT}`);
+const PORT = Number(process.env.PORT || 8080);
+const HOST = "0.0.0.0";
+
+app.listen(PORT, HOST, () => {
+  console.log(`DTH Boost key server listening on http://${HOST}:${PORT}`);
 });
