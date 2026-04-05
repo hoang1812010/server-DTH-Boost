@@ -11,7 +11,7 @@ import { fileURLToPath } from "url";
 dotenv.config();
 
 const app = express();
-const PORT = Number(process.env.PORT || 8787);
+const PORT = Number(process.env.PORT || 8080);
 const ADMIN_USERNAME = process.env.ADMIN_USERNAME || "admin";
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || "change-me-now";
 const JWT_SECRET = process.env.JWT_SECRET || "change-this-jwt-secret";
@@ -287,7 +287,6 @@ app.post("/api/session/refresh", (req, res) => {
   return res.json(makeLicenseResponse(row));
 });
 
-const PORT = Number(process.env.PORT || 8080);
 const HOST = "0.0.0.0";
 
 app.listen(PORT, HOST, () => {
