@@ -1,0 +1,172 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>DTH Boost Admin</title>
+  <style>
+    body{font-family:Inter,Arial,sans-serif;background:#0b1020;color:#eff7ff;margin:0;padding:24px}
+    .wrap{max-width:1100px;margin:0 auto}
+    .card{background:#11192f;border:1px solid rgba(255,255,255,.08);border-radius:18px;padding:20px;margin-bottom:18px}
+    input,button{padding:12px 14px;border-radius:12px;border:1px solid rgba(255,255,255,.08);background:#0c1428;color:#eff7ff}
+    button{cursor:pointer;background:#173259}
+    .row{display:flex;gap:12px;flex-wrap:wrap}
+    table{width:100%;border-collapse:collapse;font-size:14px}
+    th,td{padding:10px;border-bottom:1px solid rgba(255,255,255,.08);text-align:left}
+    .muted{color:#9fb3c8}
+    .hidden{display:none}
+    code{background:#0c1428;padding:2px 6px;border-radius:6px}
+  </style>
+</head>
+<body>
+<div class="wrap">
+  <h1>DTH Boost Admin</h1>
+  <p class="muted">Quản lý key, gia hạn, khóa key và kiểm tra trạng thái kích hoạt.</p>
+
+  <div class="card" id="loginCard">
+    <h2>Đăng nhập admin</h2>
+    <div class="row">
+      <input id="username" placeholder="TienHoang" />
+      <input id="password" type="password" placeholder="1" />
+      <button onclick="login()">Đăng nhập</button>
+    </div>
+    <p id="loginStatus" class="muted"></p>
+  </div>
+
+  <div id="appArea" class="hidden">
+    <div class="card">
+      <h2>Tạo key</h2>
+      <div class="row">
+        <input id="quantity" type="number" value="1" min="1" max="500" placeholder="Số lượng" />
+        <input id="durationHours" type="number" value="720" min="1" placeholder="Số giờ hiệu lực" />
+        <input id="maxDevices" type="number" value="1" min="1" max="3" placeholder="Số thiết bị tối đa" />
+        <input id="note" placeholder="Ghi chú" style="min-width:260px" />
+        <button onclick="createKeys()">Tạo key</button>
+      </div>
+      <p id="createStatus" class="muted"></p>
+      <div id="createdKeys"></div>
+    </div>
+
+    <div class="card">
+      <h2>Danh sách key</h2>
+      <div class="row" style="margin-bottom:12px">
+        <button onclick="loadKeys()">Tải lại</button>
+      </div>
+      <table>
+        <thead>
+          <tr>
+            <th>Code</th>
+            <th>Trạng thái</th>
+            <th>Hạn</th>
+            <th>Thiết bị</th>
+            <th>Ghi chú</th>
+            <th>Thao tác</th>
+          </tr>
+        </thead>
+        <tbody id="keysTable"></tbody>
+      </table>
+    </div>
+  </div>
+</div>
+
+<script>
+const API_BASE = "";
+let token = localStorage.getItem("dth_admin_token") || "";
+
+async function api(path, options = {}){
+  const res = await fetch(API_BASE + path, {
+    ...options,
+    headers: {
+      "Content-Type": "application/json",
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
+      ...(options.headers || {})
+    }
+  });
+  const data = await res.json();
+  if(!res.ok) throw new Error(data.error || "Request failed");
+  return data;
+}
+
+async function login(){
+  const username = document.getElementById("username").value.trim();
+  const password = document.getElementById("password").value;
+  try{
+    const data = await api("/api/admin/login", {
+      method: "POST",
+      body: JSON.stringify({ username, password })
+    });
+    token = data.token;
+    localStorage.setItem("dth_admin_token", token);
+    document.getElementById("loginStatus").textContent = "Đăng nhập thành công";
+    document.getElementById("appArea").classList.remove("hidden");
+    loadKeys();
+  }catch(err){
+    document.getElementById("loginStatus").textContent = err.message;
+  }
+}
+
+async function createKeys(){
+  try{
+    const data = await api("/api/admin/keys", {
+      method: "POST",
+      body: JSON.stringify({
+        quantity: Number(document.getElementById("quantity").value),
+        durationHours: Number(document.getElementById("durationHours").value),
+        maxDevices: Number(document.getElementById("maxDevices").value),
+        note: document.getElementById("note").value.trim()
+      })
+    });
+    document.getElementById("createStatus").textContent = `Đã tạo ${data.created.length} key`;
+    document.getElementById("createdKeys").innerHTML = data.created.map(k => `<p><code>${k}</code></p>`).join("");
+    loadKeys();
+  }catch(err){
+    document.getElementById("createStatus").textContent = err.message;
+  }
+}
+
+async function revokeKey(id){
+  if(!confirm("Khóa key này?")) return;
+  await api(`/api/admin/keys/${id}/revoke`, { method: "POST" });
+  loadKeys();
+}
+
+async function extendKey(id){
+  const hours = prompt("Gia hạn thêm bao nhiêu giờ?", "24");
+  if(!hours) return;
+  await api(`/api/admin/keys/${id}/extend`, {
+    method: "POST",
+    body: JSON.stringify({ hours: Number(hours) })
+  });
+  loadKeys();
+}
+
+async function loadKeys(){
+  try{
+    const data = await api("/api/admin/keys");
+    const tbody = document.getElementById("keysTable");
+    tbody.innerHTML = data.keys.map(row => `
+      <tr>
+        <td><code>${row.display_code}</code></td>
+        <td>${row.status}</td>
+        <td>${row.expires_at || "Chưa kích hoạt"}</td>
+        <td>${row.bound_install_id ? "Đã ràng buộc" : "Chưa ràng buộc"}</td>
+        <td>${row.note || ""}</td>
+        <td>
+          <button onclick="extendKey('${row.id}')">Gia hạn</button>
+          <button onclick="revokeKey('${row.id}')">Khóa</button>
+        </td>
+      </tr>
+    `).join("");
+    document.getElementById("appArea").classList.remove("hidden");
+  }catch(err){
+    console.log(err);
+  }
+}
+
+if(token){
+  document.getElementById("appArea").classList.remove("hidden");
+  loadKeys();
+}
+</script>
+</body>
+</html>
