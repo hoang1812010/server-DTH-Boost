@@ -23,7 +23,7 @@ const LINK4M_API_KEY = process.env.LINK4M_API_KEY || "";
 const PUBLIC_SITE_URL = process.env.PUBLIC_SITE_URL || "";
 
 // Mac dinh key mien phi: 24 gio va 1 thiet bi
-const FREE_KEY_DURATION_HOURS = Number(process.env.FREE_KEY_DURATION_HOURS || 24);
+const FREE_KEY_DURATION_HOURS = Number(process.env.FREE_KEY_DURATION_HOURS || 12);
 const FREE_KEY_MAX_DEVICES = Number(process.env.FREE_KEY_MAX_DEVICES || 1);
 
 const __filename = fileURLToPath(import.meta.url);
