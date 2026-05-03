@@ -18,6 +18,14 @@ const JWT_SECRET = process.env.JWT_SECRET || "change-this-jwt-secret";
 const SESSION_HOURS = Number(process.env.SESSION_HOURS || 12);
 const ALLOW_ORIGIN = process.env.ALLOW_ORIGIN || "*";
 
+// ====== BIEN MOI CHO LAY KEY MIEN PHI QUA LINK4M ======
+const LINK4M_API_KEY = process.env.LINK4M_API_KEY || "";
+const PUBLIC_SITE_URL = process.env.PUBLIC_SITE_URL || "";
+
+// Mac dinh key mien phi: 24 gio va 1 thiet bi
+const FREE_KEY_DURATION_HOURS = Number(process.env.FREE_KEY_DURATION_HOURS || 24);
+const FREE_KEY_MAX_DEVICES = Number(process.env.FREE_KEY_MAX_DEVICES || 1);
+
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
@@ -79,6 +87,33 @@ function randomCode(groups = 4, groupLen = 4) {
     out.push(chunk);
   }
   return out.join("-");
+}
+
+function createKey({ durationHours = 24, maxDevices = 1, note = "" } = {}) {
+  const safeDurationHours = Math.max(1, Number(durationHours || 24));
+  const safeMaxDevices = Math.max(1, Math.min(3, Number(maxDevices || 1)));
+  const safeNote = String(note || "").slice(0, 200);
+
+  let code = randomCode();
+  while (db.prepare("SELECT 1 FROM keys WHERE display_code = ?").get(code)) {
+    code = randomCode();
+  }
+
+  db.prepare(`
+    INSERT INTO keys (
+      id, display_code, key_hash, note, status, duration_hours, max_devices, created_at
+    ) VALUES (?, ?, ?, ?, 'active', ?, ?, ?)
+  `).run(
+    crypto.randomUUID(),
+    code,
+    sha256(normalizeKey(code)),
+    safeNote,
+    safeDurationHours,
+    safeMaxDevices,
+    nowIso()
+  );
+
+  return code;
 }
 
 const signAdminToken = () => jwt.sign({ role: "admin" }, JWT_SECRET, { expiresIn: "12h" });
@@ -170,31 +205,13 @@ app.post("/api/admin/keys", authAdmin, (req, res) => {
   const note = String(req.body?.note || "").slice(0, 200);
 
   const created = [];
-  const stmt = db.prepare(`
-    INSERT INTO keys (
-      id, display_code, key_hash, note, status, duration_hours, max_devices, created_at
-    ) VALUES (?, ?, ?, ?, 'active', ?, ?, ?)
-  `);
-
   const tx = db.transaction(() => {
     for (let i = 0; i < quantity; i += 1) {
-      let code = randomCode();
-      while (db.prepare("SELECT 1 FROM keys WHERE display_code = ?").get(code)) {
-        code = randomCode();
-      }
-      stmt.run(
-        crypto.randomUUID(),
-        code,
-        sha256(normalizeKey(code)),
-        note,
-        durationHours,
-        maxDevices,
-        nowIso()
-      );
-      created.push(code);
+      created.push(createKey({ durationHours, maxDevices, note }));
     }
   });
   tx();
+
   res.json({ ok: true, created });
 });
 
@@ -215,6 +232,68 @@ app.post("/api/admin/keys/:id/extend", authAdmin, (req, res) => {
   const nextExpiry = addHours(base, moreHours);
   db.prepare("UPDATE keys SET expires_at = ? WHERE id = ?").run(nextExpiry, req.params.id);
   return res.json({ ok: true, expiresAt: nextExpiry });
+});
+
+// ====== API CHO WEB KHACH: TAO KEY MIEN PHI ROI TAO LINK4M ======
+// HTML se goi POST /api/free-key-link
+// Server se tra ve { ok: true, shortUrl: "https://..." }
+// Khach vuot link xong se quay ve PUBLIC_SITE_URL?key=XXXX-XXXX-XXXX-XXXX
+app.post("/api/free-key-link", async (_req, res) => {
+  try {
+    if (!LINK4M_API_KEY) {
+      return res.status(500).json({ ok: false, error: "Thieu bien moi truong LINK4M_API_KEY" });
+    }
+
+    if (!PUBLIC_SITE_URL) {
+      return res.status(500).json({ ok: false, error: "Thieu bien moi truong PUBLIC_SITE_URL" });
+    }
+
+    const key = createKey({
+      durationHours: FREE_KEY_DURATION_HOURS,
+      maxDevices: FREE_KEY_MAX_DEVICES,
+      note: "free key from website"
+    });
+
+    const cleanPublicSiteUrl = PUBLIC_SITE_URL.replace(/\/$/, "");
+    const claimUrl = `${cleanPublicSiteUrl}?key=${encodeURIComponent(key)}`;
+
+    // Link dich se la web cua ban kem key.
+    // Sau khi khach vuot Link4m, Link4m se dua khach ve link nay va HTML se hien key.
+    const link4mApiUrl = `https://link4m.co/st?api=${encodeURIComponent(LINK4M_API_KEY)}&url=${encodeURIComponent(claimUrl)}`;
+
+    const link4mRes = await fetch(link4mApiUrl, { method: "GET" });
+    const rawText = (await link4mRes.text()).trim();
+
+    if (!link4mRes.ok) {
+      return res.status(500).json({
+        ok: false,
+        error: "Khong tao duoc Link4m",
+        detail: rawText
+      });
+    }
+
+    let shortUrl = "";
+
+    // Mot so API tra ve plain text, mot so API tra ve JSON.
+    try {
+      const data = rawText ? JSON.parse(rawText) : {};
+      shortUrl = data.shortenedUrl || data.shorturl || data.shortUrl || data.short || data.url || data.link || "";
+    } catch {
+      shortUrl = rawText;
+    }
+
+    if (!shortUrl || !/^https?:\/\//i.test(shortUrl)) {
+      return res.status(500).json({
+        ok: false,
+        error: "Link4m khong tra ve link hop le",
+        detail: rawText
+      });
+    }
+
+    return res.json({ ok: true, shortUrl });
+  } catch (err) {
+    return res.status(500).json({ ok: false, error: "Loi server", message: err.message });
+  }
 });
 
 function activateHandler(req, res) {
