@@ -12,17 +12,18 @@ dotenv.config();
 
 const app = express();
 const PORT = Number(process.env.PORT || 8080);
+const HOST = "0.0.0.0";
+
 const ADMIN_USERNAME = process.env.ADMIN_USERNAME || "admin";
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || "change-me-now";
 const JWT_SECRET = process.env.JWT_SECRET || "change-this-jwt-secret";
 const SESSION_HOURS = Number(process.env.SESSION_HOURS || 12);
 const ALLOW_ORIGIN = process.env.ALLOW_ORIGIN || "*";
 
-// ====== BIEN MOI CHO LAY KEY MIEN PHI QUA LINK4M ======
+// ====== FREE KEY + LINK4M CONFIG ======
+// Mac dinh free key: 12 gio / 1 thiet bi.
 const LINK4M_API_KEY = process.env.LINK4M_API_KEY || "";
 const PUBLIC_SITE_URL = process.env.PUBLIC_SITE_URL || "";
-
-// Mac dinh key mien phi: 24 gio va 1 thiet bi
 const FREE_KEY_DURATION_HOURS = Number(process.env.FREE_KEY_DURATION_HOURS || 12);
 const FREE_KEY_MAX_DEVICES = Number(process.env.FREE_KEY_MAX_DEVICES || 1);
 
@@ -64,21 +65,24 @@ CREATE TABLE IF NOT EXISTS activation_logs (
 
 app.use(helmet({ contentSecurityPolicy: false }));
 app.use(cors({ origin: ALLOW_ORIGIN === "*" ? true : ALLOW_ORIGIN.split(",") }));
-app.use(express.json());
+app.use(express.json({ limit: "1mb" }));
 app.use(express.static(path.join(__dirname, "public")));
 
 const nowIso = () => new Date().toISOString();
+
 const addHours = (dateIso, hours) => {
   const d = new Date(dateIso);
   d.setHours(d.getHours() + hours);
   return d.toISOString();
 };
+
 const normalizeKey = input => String(input || "").trim().toUpperCase().replace(/[^A-Z0-9]/g, "");
 const sha256 = input => crypto.createHash("sha256").update(input).digest("hex");
 
 function randomCode(groups = 4, groupLen = 4) {
   const alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
   const out = [];
+
   for (let g = 0; g < groups; g += 1) {
     let chunk = "";
     for (let i = 0; i < groupLen; i += 1) {
@@ -86,11 +90,12 @@ function randomCode(groups = 4, groupLen = 4) {
     }
     out.push(chunk);
   }
+
   return out.join("-");
 }
 
-function createKey({ durationHours = 24, maxDevices = 1, note = "" } = {}) {
-  const safeDurationHours = Math.max(1, Number(durationHours || 24));
+function createKey({ durationHours = 12, maxDevices = 1, note = "" } = {}) {
+  const safeDurationHours = Math.max(1, Number(durationHours || 12));
   const safeMaxDevices = Math.max(1, Math.min(3, Number(maxDevices || 1)));
   const safeNote = String(note || "").slice(0, 200);
 
@@ -116,7 +121,129 @@ function createKey({ durationHours = 24, maxDevices = 1, note = "" } = {}) {
   return code;
 }
 
+function deleteKeyByCode(code) {
+  try {
+    db.prepare("DELETE FROM keys WHERE display_code = ?").run(code);
+  } catch {
+    // Khong can crash neu xoa that bai.
+  }
+}
+
+function hideSecret(value) {
+  const text = String(value || "");
+  if (text.length <= 8) return text ? "***" : "";
+  return `${text.slice(0, 4)}...${text.slice(-4)}`;
+}
+
+function normalizeReturnedUrl(value) {
+  let url = String(value || "").trim();
+  if (!url) return "";
+
+  if (url.startsWith("//")) url = `https:${url}`;
+  if (/^(link4m|link4)\./i.test(url)) url = `https://${url}`;
+
+  const match = url.match(/https?:\/\/[^\s"'<>]+/i);
+  return match ? match[0] : url;
+}
+
+function parsePossibleShortUrl(rawText) {
+  const text = String(rawText || "").trim();
+  if (!text) return "";
+
+  try {
+    const data = JSON.parse(text);
+    const candidate =
+      data.shortenedUrl ||
+      data.shorturl ||
+      data.shortUrl ||
+      data.short ||
+      data.url ||
+      data.link ||
+      data.result ||
+      data.data?.shortenedUrl ||
+      data.data?.shorturl ||
+      data.data?.shortUrl ||
+      data.data?.url ||
+      data.data?.link ||
+      "";
+
+    return normalizeReturnedUrl(candidate);
+  } catch {
+    return normalizeReturnedUrl(text);
+  }
+}
+
+function isValidHttpUrl(value) {
+  return /^https?:\/\//i.test(String(value || "").trim());
+}
+
+async function createLink4mShortUrl(destinationUrl) {
+  const attempts = [];
+
+  // CACH 1: API ban dua: https://link4m.co/st?api=...&url=...
+  try {
+    const apiUrl = `https://link4m.co/st?api=${encodeURIComponent(LINK4M_API_KEY)}&url=${encodeURIComponent(destinationUrl)}`;
+
+    const res = await fetch(apiUrl, {
+      method: "GET",
+      redirect: "manual"
+    });
+
+    const location = res.headers.get("location") || "";
+    const raw = (await res.text()).trim();
+    const shortUrl = normalizeReturnedUrl(location) || parsePossibleShortUrl(raw);
+
+    attempts.push({
+      method: "GET link4m.co/st",
+      status: res.status,
+      location: normalizeReturnedUrl(location),
+      raw: raw.slice(0, 500)
+    });
+
+    if ((res.ok || [301, 302, 303, 307, 308].includes(res.status)) && isValidHttpUrl(shortUrl)) {
+      return { ok: true, shortUrl: shortUrl.trim(), attempts };
+    }
+  } catch (err) {
+    attempts.push({ method: "GET link4m.co/st", error: err.message });
+  }
+
+  // CACH 2: API Bearer POST cua Link4/Link4m neu tai khoan ho tro.
+  try {
+    const res = await fetch("https://link4.net/api/url/add", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${LINK4M_API_KEY}`,
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({
+        url: destinationUrl,
+        type: "direct",
+        metatitle: "Nhan key mien phi",
+        metadescription: "Vuot link de nhan key mien phi"
+      })
+    });
+
+    const raw = (await res.text()).trim();
+    const shortUrl = parsePossibleShortUrl(raw);
+
+    attempts.push({
+      method: "POST link4.net/api/url/add",
+      status: res.status,
+      raw: raw.slice(0, 500)
+    });
+
+    if (res.ok && isValidHttpUrl(shortUrl)) {
+      return { ok: true, shortUrl: shortUrl.trim(), attempts };
+    }
+  } catch (err) {
+    attempts.push({ method: "POST link4.net/api/url/add", error: err.message });
+  }
+
+  return { ok: false, attempts };
+}
+
 const signAdminToken = () => jwt.sign({ role: "admin" }, JWT_SECRET, { expiresIn: "12h" });
+
 const signSessionToken = key => {
   const ttlHours = Math.max(
     1,
@@ -125,6 +252,7 @@ const signSessionToken = key => {
       Math.floor((new Date(key.expires_at).getTime() - Date.now()) / 3600000) || 1
     )
   );
+
   return jwt.sign(
     { role: "session", keyId: key.id, installId: key.bound_install_id, deviceHash: key.bound_device_hash },
     JWT_SECRET,
@@ -135,7 +263,9 @@ const signSessionToken = key => {
 function authAdmin(req, res, next) {
   const auth = req.headers.authorization || "";
   const token = auth.startsWith("Bearer ") ? auth.slice(7) : "";
+
   if (!token) return res.status(401).json({ ok: false, error: "Missing admin token" });
+
   try {
     const payload = jwt.verify(token, JWT_SECRET);
     if (payload.role !== "admin") return res.status(403).json({ ok: false, error: "Forbidden" });
@@ -180,11 +310,33 @@ app.get("/api/health", (_req, res) => {
   res.json({ ok: true, service: "dth-boost-key-server", time: nowIso() });
 });
 
+app.get("/api/free-key-config", (_req, res) => {
+  res.json({
+    ok: true,
+    link4mApiKeyConfigured: Boolean(LINK4M_API_KEY),
+    link4mApiKeyPreview: hideSecret(LINK4M_API_KEY),
+    publicSiteUrlConfigured: Boolean(PUBLIC_SITE_URL),
+    publicSiteUrl: PUBLIC_SITE_URL || null,
+    freeKeyDurationHours: FREE_KEY_DURATION_HOURS,
+    freeKeyMaxDevices: FREE_KEY_MAX_DEVICES,
+    allowOrigin: ALLOW_ORIGIN
+  });
+});
+
+app.get("/api/free-key-link", (_req, res) => {
+  res.status(405).json({
+    ok: false,
+    error: "Endpoint nay phai goi bang POST. Web HTML se tu goi POST /api/free-key-link."
+  });
+});
+
 app.post("/api/admin/login", (req, res) => {
   const { username, password } = req.body || {};
+
   if (username !== ADMIN_USERNAME || password !== ADMIN_PASSWORD) {
     return res.status(401).json({ ok: false, error: "Sai tài khoản hoặc mật khẩu" });
   }
+
   return res.json({ ok: true, token: signAdminToken() });
 });
 
@@ -195,6 +347,7 @@ app.get("/api/admin/keys", authAdmin, (_req, res) => {
     FROM keys
     ORDER BY created_at DESC
   `).all();
+
   res.json({ ok: true, keys: rows });
 });
 
@@ -210,8 +363,8 @@ app.post("/api/admin/keys", authAdmin, (req, res) => {
       created.push(createKey({ durationHours, maxDevices, note }));
     }
   });
-  tx();
 
+  tx();
   res.json({ ok: true, created });
 });
 
@@ -224,21 +377,23 @@ app.post("/api/admin/keys/:id/revoke", authAdmin, (req, res) => {
 app.post("/api/admin/keys/:id/extend", authAdmin, (req, res) => {
   const moreHours = Math.max(1, Number(req.body?.hours || 24));
   const row = db.prepare("SELECT * FROM keys WHERE id = ?").get(req.params.id);
+
   if (!row) return res.status(404).json({ ok: false, error: "Không tìm thấy key" });
 
   const base = row.expires_at && new Date(row.expires_at).getTime() > Date.now()
     ? row.expires_at
     : nowIso();
+
   const nextExpiry = addHours(base, moreHours);
   db.prepare("UPDATE keys SET expires_at = ? WHERE id = ?").run(nextExpiry, req.params.id);
+
   return res.json({ ok: true, expiresAt: nextExpiry });
 });
 
-// ====== API CHO WEB KHACH: TAO KEY MIEN PHI ROI TAO LINK4M ======
-// HTML se goi POST /api/free-key-link
-// Server se tra ve { ok: true, shortUrl: "https://..." }
-// Khach vuot link xong se quay ve PUBLIC_SITE_URL?key=XXXX-XXXX-XXXX-XXXX
+// ====== API CHO WEB KHACH: TAO KEY 12H / 1 THIET BI ROI TAO LINK4M ======
 app.post("/api/free-key-link", async (_req, res) => {
+  let key = "";
+
   try {
     if (!LINK4M_API_KEY) {
       return res.status(500).json({ ok: false, error: "Thieu bien moi truong LINK4M_API_KEY" });
@@ -248,7 +403,7 @@ app.post("/api/free-key-link", async (_req, res) => {
       return res.status(500).json({ ok: false, error: "Thieu bien moi truong PUBLIC_SITE_URL" });
     }
 
-    const key = createKey({
+    key = createKey({
       durationHours: FREE_KEY_DURATION_HOURS,
       maxDevices: FREE_KEY_MAX_DEVICES,
       note: "free key from website"
@@ -257,41 +412,20 @@ app.post("/api/free-key-link", async (_req, res) => {
     const cleanPublicSiteUrl = PUBLIC_SITE_URL.replace(/\/$/, "");
     const claimUrl = `${cleanPublicSiteUrl}?key=${encodeURIComponent(key)}`;
 
-    // Link dich se la web cua ban kem key.
-    // Sau khi khach vuot Link4m, Link4m se dua khach ve link nay va HTML se hien key.
-    const link4mApiUrl = `https://link4m.co/st?api=${encodeURIComponent(LINK4M_API_KEY)}&url=${encodeURIComponent(claimUrl)}`;
+    const linkResult = await createLink4mShortUrl(claimUrl);
 
-    const link4mRes = await fetch(link4mApiUrl, { method: "GET" });
-    const rawText = (await link4mRes.text()).trim();
-
-    if (!link4mRes.ok) {
-      return res.status(500).json({
-        ok: false,
-        error: "Khong tao duoc Link4m",
-        detail: rawText
-      });
-    }
-
-    let shortUrl = "";
-
-    // Mot so API tra ve plain text, mot so API tra ve JSON.
-    try {
-      const data = rawText ? JSON.parse(rawText) : {};
-      shortUrl = data.shortenedUrl || data.shorturl || data.shortUrl || data.short || data.url || data.link || "";
-    } catch {
-      shortUrl = rawText;
-    }
-
-    if (!shortUrl || !/^https?:\/\//i.test(shortUrl)) {
+    if (!linkResult.ok) {
+      deleteKeyByCode(key);
       return res.status(500).json({
         ok: false,
         error: "Link4m khong tra ve link hop le",
-        detail: rawText
+        detail: linkResult.attempts
       });
     }
 
-    return res.json({ ok: true, shortUrl });
+    return res.json({ ok: true, shortUrl: linkResult.shortUrl });
   } catch (err) {
+    if (key) deleteKeyByCode(key);
     return res.status(500).json({ ok: false, error: "Loi server", message: err.message });
   }
 });
@@ -299,40 +433,48 @@ app.post("/api/free-key-link", async (_req, res) => {
 function activateHandler(req, res) {
   const body = req.body || {};
   const normalized = normalizeKey(body.key);
+
   if (!normalized) return res.status(400).json({ ok: false, error: "Thiếu key" });
 
   const row = db.prepare("SELECT * FROM keys WHERE key_hash = ?").get(sha256(normalized));
+
   if (!row) return res.status(404).json({ ok: false, error: "Key không tồn tại" });
   if (row.status !== "active") return res.status(403).json({ ok: false, error: "Key đã bị khóa" });
+
   if (row.expires_at && new Date(row.expires_at).getTime() <= Date.now()) {
     return res.status(403).json({ ok: false, error: "Key đã hết hạn" });
   }
 
   const installId = String(body.installId || "").trim();
   const bindingId = String(body.bindingId || "").trim();
+
   if (!installId || !bindingId) {
     return res.status(400).json({ ok: false, error: "Thiếu thông tin ràng buộc thiết bị" });
   }
 
   if (row.bound_install_id && row.bound_device_hash) {
     const sameDevice = row.bound_install_id === installId && row.bound_device_hash === bindingId;
+
     if (!sameDevice) {
       return res.status(409).json({ ok: false, error: "Key này đã được dùng trên thiết bị khác" });
     }
   } else {
     const activatedAt = nowIso();
     const expiresAt = addHours(activatedAt, row.duration_hours);
+
     db.prepare(`
       UPDATE keys
       SET activated_at = ?, expires_at = ?, bound_install_id = ?, bound_device_hash = ?, last_seen_at = ?
       WHERE id = ?
     `).run(activatedAt, expiresAt, installId, bindingId, nowIso(), row.id);
+
     logActivationEvent(row.id, "activate", body);
   }
 
   const updated = db.prepare("SELECT * FROM keys WHERE id = ?").get(row.id);
   db.prepare("UPDATE keys SET last_seen_at = ? WHERE id = ?").run(nowIso(), row.id);
   logActivationEvent(row.id, "refresh", body);
+
   return res.json(makeLicenseResponse(updated));
 }
 
@@ -341,6 +483,7 @@ app.post("/api/key/verify", activateHandler);
 
 app.post("/api/session/refresh", (req, res) => {
   const { sessionToken, installId, bindingId } = req.body || {};
+
   if (!sessionToken) return res.status(400).json({ ok: false, error: "Thiếu session token" });
 
   let payload;
@@ -353,20 +496,22 @@ app.post("/api/session/refresh", (req, res) => {
   if (payload.role !== "session") return res.status(403).json({ ok: false, error: "Sai loại token" });
 
   const row = db.prepare("SELECT * FROM keys WHERE id = ?").get(payload.keyId);
+
   if (!row) return res.status(404).json({ ok: false, error: "Không tìm thấy key" });
   if (row.status !== "active") return res.status(403).json({ ok: false, error: "Key đã bị khóa" });
+
   if (!row.expires_at || new Date(row.expires_at).getTime() <= Date.now()) {
     return res.status(403).json({ ok: false, error: "Key đã hết hạn" });
   }
+
   if (row.bound_install_id !== installId || row.bound_device_hash !== bindingId) {
     return res.status(409).json({ ok: false, error: "Thiết bị không khớp với key đã kích hoạt" });
   }
 
   db.prepare("UPDATE keys SET last_seen_at = ? WHERE id = ?").run(nowIso(), row.id);
+
   return res.json(makeLicenseResponse(row));
 });
-
-const HOST = "0.0.0.0";
 
 app.listen(PORT, HOST, () => {
   console.log(`DTH Boost key server listening on http://${HOST}:${PORT}`);
